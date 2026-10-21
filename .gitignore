@@ -1,0 +1,17 @@
+.DS_Store
+node_modules/
+ref/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.log
+*.tgz
+coverage/
+dist/
+.dsh/
+.npmrc
+.pnpm-store/

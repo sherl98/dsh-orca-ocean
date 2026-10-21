@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "ASCII Orca Cruise",
+    "description": "A dynamic pure-ASCII background of a cruising orca, active only on the new-session page. After the first prompt is sent, the orca dives Into the Unknown."
+  }
+}

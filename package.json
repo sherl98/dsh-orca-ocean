@@ -1,0 +1,62 @@
+{
+  "name": "@sherl98/dsh-orca-ocean",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "A dynamic pure-ASCII background of a cruising orca for the new-session page; after the first prompt, it dives Into the Unknown.",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.en.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "author": "sherl98",
+  "license": "MIT",
+  "icon": "./icon.svg",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sherl98/dsh-orca-ocean.git"
+  },
+  "homepage": "https://github.com/sherl98/dsh-orca-ocean#readme",
+  "bugs": {
+    "url": "https://github.com/sherl98/dsh-orca-ocean/issues"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "ascii",
+    "orca",
+    "ui",
+    "animation"
+  ],
+  "engines": {
+    "node": ">=20.11.0",
+    "dsh": "0.2.1-rc.2"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "prepack": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
