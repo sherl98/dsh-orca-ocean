@@ -14,7 +14,9 @@
 | --- | --- |
 | ![浅色模式](assets/light.png) | ![深色模式](assets/dark.png) |
 
-演示环境：DeepSeek Harness `0.2.1-rc.2`（macOS）。
+演示环境：DeepSeek Harness `0.2.1-rc.3`（macOS）。
+
+兼容 DeepSeek Harness `0.2.1-rc.2` 及后续 `0.2.x` 版本。
 
 ## 安装
 

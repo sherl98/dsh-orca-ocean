@@ -1,6 +1,6 @@
 {
   "name": "@sherl98/dsh-orca-ocean",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "A dynamic pure-ASCII background of a cruising orca for the new-session page; after the first prompt, it dives Into the Unknown.",
   "exports": {
@@ -50,7 +50,7 @@
   ],
   "engines": {
     "node": ">=20.11.0",
-    "dsh": "0.2.1-rc.2"
+    "dsh": ">=0.2.1-rc.2 <0.3.0"
   },
   "scripts": {
     "build": "node build.mjs",

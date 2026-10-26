@@ -14,7 +14,9 @@ A dynamic pure-ASCII background of a cruising orca, active only on the new-sessi
 | --- | --- |
 | ![Light mode](assets/light.png) | ![Dark mode](assets/dark.png) |
 
-Demo environment: DeepSeek Harness `0.2.1-rc.2` on macOS.
+Demo environment: DeepSeek Harness `0.2.1-rc.3` on macOS.
+
+Compatible with DeepSeek Harness `0.2.1-rc.2` and later `0.2.x` releases.
 
 ## Install
 
