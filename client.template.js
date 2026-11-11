@@ -30,17 +30,17 @@ window.__ModuleLoader__.load({
     const MONO =
       'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
     const TWO_PI = Math.PI * 2;
+    const CAMERA_PLANE = 0.975;
+    const CAMERA_LIFT = Math.sqrt(1 - CAMERA_PLANE * CAMERA_PLANE);
     const GLYPHS = " .'`:;~-+=*xX%8#@";
     const PATCH_GLYPHS = '#%@8';
-    const BUBBLE_GLYPHS = "o.'O";
+    const WATER_GLYPHS = '~=-.\'';
 
     const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
     const smooth = (a, b, x) => {
       const t = clamp((x - a) / (b - a), 0, 1);
       return t * t * (3 - 2 * t);
     };
-    const easeIn = (t) => t * t;
-    const easeOut = (t) => 1 - (1 - t) * (1 - t);
 
     function hash2(x, y) {
       let n = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263);
@@ -52,6 +52,15 @@ window.__ModuleLoader__.load({
       while (a > Math.PI) a -= TWO_PI;
       while (a < -Math.PI) a += TWO_PI;
       return a;
+    }
+
+    function expire(items, now) {
+      let count = 0;
+      for (let i = 0; i < items.length; i += 1) {
+        const item = items[i];
+        if (now - item.t0 < item.life) items[count++] = item;
+      }
+      items.length = count;
     }
 
     function isDark() {
@@ -67,9 +76,7 @@ window.__ModuleLoader__.load({
     function palette(dark) {
       return dark
         ? {
-            ink: '236, 243, 247',
             inkRgb: [236, 243, 247],
-            patch: '#ffffff',
             patchRgb: [255, 255, 255],
             water: '152, 196, 216',
             waterRgb: [152, 196, 216],
@@ -77,9 +84,7 @@ window.__ModuleLoader__.load({
             crest: '208, 234, 242',
           }
         : {
-            ink: '10, 20, 26',
             inkRgb: [10, 20, 26],
-            patch: '#ffffff',
             patchRgb: [255, 255, 255],
             water: '66, 100, 116',
             waterRgb: [56, 92, 108],
@@ -100,22 +105,32 @@ window.__ModuleLoader__.load({
       return `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
     }
 
-    function sampleField(field, u, v) {
-      const fx = clamp(u, 0, 1) * (COLS - 1);
-      const fy = clamp(v, 0, 1) * (ROWS - 1);
-      const x0 = fx | 0;
-      const y0 = fy | 0;
-      const x1 = x0 < COLS - 1 ? x0 + 1 : x0;
-      const y1 = y0 < ROWS - 1 ? y0 + 1 : y0;
-      const tx = fx - x0;
-      const ty = fy - y0;
-      const a = field[y0 * COLS + x0];
-      const b = field[y0 * COLS + x1];
-      const c = field[y1 * COLS + x0];
-      const d = field[y1 * COLS + x1];
-      const top = a + (b - a) * tx;
-      const bot = c + (d - c) * tx;
-      return (top + (bot - top) * ty) / 15;
+    // A shaped dorsal surface, not a flat rotating sprite. The flippers and
+    // flukes are thin; the trunk has a rounded cross-section and a dorsal ridge.
+    function surfaceHeight(u, v) {
+      const trunk = smooth(0.12, 0.43, u) * (1 - smooth(0.82, 1.01, u));
+      const radius = 0.018 + trunk * 0.11;
+      const section = Math.sqrt(Math.max(0, 1 - Math.pow(v / radius, 2)));
+      const back = trunk * 0.085 * section;
+      const dorsal = 0.095 * Math.exp(-Math.pow((u - 0.565) / 0.062, 2)) *
+        (1 - smooth(0.005, 0.022, Math.abs(v)));
+      return back + dorsal;
+    }
+
+    const SURFACE = [];
+    for (let c = 0; c < COLS; c += 1) {
+      const u = c / (COLS - 1);
+      for (let r = 0; r < ROWS; r += 1) {
+        const i = r * COLS + c;
+        if (COV[i] < 2) continue;
+        const v = (r / (ROWS - 1) - 0.5) * 2 * VHALF;
+        const z = surfaceHeight(u, v);
+        const nx = -(surfaceHeight(u + 0.003, v) - surfaceHeight(u - 0.003, v)) / 0.006;
+        const ny = -(surfaceHeight(u, v + 0.003) - surfaceHeight(u, v - 0.003)) / 0.006;
+        const norm = Math.hypot(nx, ny, 1);
+        SURFACE.push({ column: c, finTip: smooth(0.085, 0.22, Math.abs(v)), u, v, z, nx: nx / norm, ny: ny / norm, nz: 1 / norm,
+          cov: COV[i] / 15, tone: TONE[i] / 15, patch: PATCH[i] / 15 });
+      }
     }
 
     const CSS = `
@@ -161,25 +176,21 @@ window.__ModuleLoader__.load({
         this.orca = null;
         this.poseScale = 1;
         this.trail = [];
-        this.bubbles = [];
         this.turnRate = 0;
+        this.turnVel = 0;
+        this.bank = 0;
+        this.strokeGain = 1;
         this.speedNorm = 0;
-        this.prevCruiseHeading = null;
         this.spray = [];
         this.nextSpray = 0;
-        this.headingVisual = 0;
         this.waterSeed = Math.random() * 1000;
         this.tailRipples = [];
+        this.surfaceRipples = [];
         this.tailPulse = -1;
         this.diveAt = 0;
-        this.diveX = 0;
-        this.diveY = 0;
-        this.diveHeading = 0;
-        this.lastBubble = 0;
         this.diveTimer = 0;
         this.last = 0;
         this.lastDraw = 0;
-        this.lastTrail = 0;
         this.raf = 0;
         this.resizeTimer = 0;
         this.themeObserver = null;
@@ -188,6 +199,9 @@ window.__ModuleLoader__.load({
         this.boundLoop = (now) => this.loop(now);
         this.onWinResize = () => this.scheduleResize();
         this.onMotion = () => this.motionChanged();
+        this.hiddenAt = null;
+        this.onVisibility = () => this.visibilityChanged();
+        this.damage = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
       }
 
       show(host) {
@@ -214,18 +228,17 @@ window.__ModuleLoader__.load({
         this.wave = Math.random() * TWO_PI;
         this.poseScale = 1;
         this.trail = [];
-        this.bubbles = [];
         this.turnRate = 0;
+        this.turnVel = 0;
+        this.bank = 0;
+        this.strokeGain = 1;
         this.speedNorm = 0;
-        this.prevCruiseHeading = null;
         this.spray = [];
         this.nextSpray = 0;
-        this.headingVisual = 0;
         this.waterSeed = Math.random() * 1000;
         this.tailRipples = [];
+        this.surfaceRipples = [];
         this.tailPulse = -1;
-        this.lastBubble = 0;
-        this.lastTrail = 0;
         this.canvas = document.createElement('canvas');
         this.canvas.className = 'orca-ocean-canvas';
         this.canvas.setAttribute('aria-hidden', 'true');
@@ -238,7 +251,7 @@ window.__ModuleLoader__.load({
         this.enterAt = performance.now();
         this.last = performance.now();
         this.lastDraw = 0;
-        if (!this.reduced) this.raf = requestAnimationFrame(this.boundLoop);
+        if (!this.reduced && !document.hidden) this.raf = requestAnimationFrame(this.boundLoop);
         else this.drawStatic();
       }
 
@@ -276,6 +289,7 @@ window.__ModuleLoader__.load({
         this.themeObserver = null;
         this.resizeObserver = null;
         window.removeEventListener('resize', this.onWinResize);
+        document.removeEventListener('visibilitychange', this.onVisibility);
         if (this.motionQuery && this.motionQuery.removeEventListener) {
           this.motionQuery.removeEventListener('change', this.onMotion);
         }
@@ -287,11 +301,18 @@ window.__ModuleLoader__.load({
         this.canvas = null;
         this.ctx = null;
         this.orca = null;
+        this.glyphBuffer = null;
+        this.waterGrid = null;
+        this.poseColumns = null;
+        this.hiddenAt = null;
         this.trail = [];
-        this.bubbles = [];
         this.turnRate = 0;
+        this.turnVel = 0;
+        this.bank = 0;
+        this.strokeGain = 1;
         this.spray = [];
         this.tailRipples = [];
+        this.surfaceRipples = [];
         this.tailPulse = -1;
         this.phase = 'idle';
       }
@@ -315,6 +336,8 @@ window.__ModuleLoader__.load({
           this.resizeObserver.observe(host);
         }
         window.addEventListener('resize', this.onWinResize);
+        document.addEventListener('visibilitychange', this.onVisibility);
+        if (document.hidden) this.hiddenAt = performance.now();
         if (this.motionQuery && this.motionQuery.addEventListener) {
           this.motionQuery.addEventListener('change', this.onMotion);
         }
@@ -332,13 +355,33 @@ window.__ModuleLoader__.load({
         if (this.reduced) {
           if (this.raf) cancelAnimationFrame(this.raf);
           this.raf = 0;
+          if (this.phase === 'dive' || this.phase === 'after') { this.destroy(); return; }
           this.enter = 1;
           this.drawStatic();
-        } else if (this.host && !this.raf) {
+        } else if (this.host && !this.raf && !document.hidden) {
           this.last = performance.now();
           this.lastDraw = 0;
           this.raf = requestAnimationFrame(this.boundLoop);
         }
+      }
+
+      visibilityChanged() {
+        if (!this.host) return;
+        const now = performance.now();
+        if (document.hidden) {
+          if (this.hiddenAt === null) this.hiddenAt = now;
+          if (this.raf) cancelAnimationFrame(this.raf);
+          this.raf = 0;
+          return;
+        }
+        if (this.hiddenAt !== null) {
+          this.enterAt += now - this.hiddenAt;
+          if (this.phase === 'dive' || this.phase === 'after') this.diveAt += now - Math.max(this.hiddenAt, this.diveAt);
+          this.hiddenAt = null;
+        }
+        this.last = now;
+        this.lastDraw = 0;
+        if (!this.reduced && !this.raf) this.raf = requestAnimationFrame(this.boundLoop);
       }
 
       scheduleResize() {
@@ -359,9 +402,12 @@ window.__ModuleLoader__.load({
         const height = host.clientHeight;
         if (width < 40 || height < 40) return;
         const dpr = Math.min(2, window.devicePixelRatio || 1);
+        if (this.font && this.w === width && this.h === height &&
+          this.canvas.width === Math.round(width * dpr) && this.canvas.height === Math.round(height * dpr) && this.dpr === dpr) return;
         this.w = width;
         this.h = height;
         this.dpr = dpr;
+        this.waterGrid = null;
         this.canvas.width = Math.max(1, Math.round(width * dpr));
         this.canvas.height = Math.max(1, Math.round(height * dpr));
         this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -370,258 +416,428 @@ window.__ModuleLoader__.load({
         this.cw = this.ch * 0.63;
         this.cols = Math.ceil(width / this.cw) + 1;
         this.rows = Math.ceil(height / this.ch) + 1;
-        this.baseL = clamp(Math.min(width * 0.47, height * 0.6), 340, 620);
+        this.baseL = clamp(Math.min(width * 0.65, height * 0.6), 170, 620);
         this.font = `500 ${Math.round(this.ch * 0.94)}px ${MONO}`;
 
         if (this.orca) {
           this.orca.x = clamp(this.orca.x, 0, width);
           this.orca.y = clamp(this.orca.y, 0, height);
         }
-        if (this.phase === 'dive' || this.phase === 'after') {
-          this.diveX = clamp(this.diveX, 0, width);
-          this.diveY = clamp(this.diveY, 0, height);
-        }
       }
 
       seedOrca() {
-        this.poseScale = 0.97;
-        const L = this.baseL * this.poseScale;
-        const inset = Math.min(this.w * 0.5, L * 0.08);
-        const x = clamp(
-          this.w * 0.5 + (Math.random() - 0.5) * this.w * 0.3,
-          inset,
-          this.w - inset,
-        );
-        const y = clamp(
-          this.h * 0.48 + (Math.random() - 0.5) * this.h * 0.28,
-          inset,
-          this.h - inset,
-        );
+        this.poseScale = 0.98;
         const heading = Math.random() * TWO_PI;
-        const speed = 20 + Math.random() * 4;
-        this.orca = { x, y, heading, speed };
+        this.orca = {
+          x: this.w * (0.32 + Math.random() * 0.36),
+          y: this.h * (0.3 + Math.random() * 0.4),
+          heading,
+          speed: 15 + Math.random() * 3,
+        };
         this.turnRate = 0;
-        this.speedNorm = speed / 26;
-        this.prevCruiseHeading = heading;
+        this.turnVel = 0;
+        this.bank = 0;
+        this.curvature = 0;
+        this.speedNorm = this.orca.speed / 20;
         this.target = null;
         this.targetAt = 0;
-        this.wanderPhase = Math.random() * TWO_PI;
+        this.cruiseSpeed = 14 + Math.random() * 8;
+        this.turnMemory = 0;
+        this.turnRun = 0;
+        this.crossing = false;
+        this.crossingCooldown = 0;
+        this.excursion = false;
+        this.nextExcursion = 22 + Math.random() * 42;
+        this.turnBudget = 1.7 + Math.random() * 1.1;
+        this.closestTarget = Infinity;
+        this.targetPassing = 0;
+        this.visited = [];
+        this.surfaceRipples = [];
+        this.intentTurn = Math.random() < 0.5 ? -1 : 1;
+        this.depth = 0.18;
+        this.depthTarget = 0.18;
+        this.depthVel = 0;
+        this.pitch = 0;
+        this.rollDrift = 0;
+        this.rollTarget = 0;
+        this.cadence = 1;
+        this.glyphBuffer = null;
+        this.gait = 'stroke';
+        this.wave = 0;
+        this.strokeEnd = TWO_PI * (1 + Math.floor(Math.random() * 2));
+        this.glideUntil = 0;
+        this.strokeGain = 0;
+        this.thrust = 0;
+        this.tailPulse = 0;
+        this.wakeDistance = 0;
         this.spray = [];
         this.nextSpray = 0;
-        this.headingVisual = heading;
-        this.wave = Math.random() * TWO_PI;
-        this.tailPulse = Math.floor(this.wave / Math.PI);
       }
 
       pickTarget() {
         const o = this.orca;
-        if (!o) return;
-        const L = this.baseL * this.poseScale;
-        const wide = Math.random() < 0.15;
-        const spread = wide ? Math.PI : 1.75;
-        let tx = o.x;
-        let ty = o.y;
-        for (let tries = 0; tries < 12; tries += 1) {
-          const angle = o.heading + (Math.random() * 2 - 1) * spread;
-          const dist = L * (0.9 + Math.random() * 1.6);
-          tx = clamp(o.x + Math.cos(angle) * dist, 8, this.w - 8);
-          ty = clamp(o.y + Math.sin(angle) * dist, 8, this.h - 8);
-          if (Math.hypot(tx - o.x, ty - o.y) > L * 0.75) break;
+        const L = this.baseL;
+        const desiredDistance = L * (0.45 + Math.random() * 1.25);
+        const preferredSide = Math.abs(this.turnMemory) > 0.65 ? -Math.sign(this.turnMemory) : Math.random() < 0.5 ? -1 : 1;
+        this.intentTurn = preferredSide;
+        const excursion = this.clock >= this.nextExcursion;
+        this.excursion = excursion;
+        this.turnBudget = 1.7 + Math.random() * 1.1;
+        let best;
+        let bestScore = -Infinity;
+        for (let i = 0; i < 32; i += 1) {
+          const angle = Math.random() * TWO_PI;
+          const radius = Math.sqrt(Math.random());
+          let x = this.w * (0.5 + Math.cos(angle) * radius * 0.31);
+          let y = this.h * (0.5 + Math.sin(angle) * radius * 0.29);
+          if (excursion) {
+            const side = i % 4;
+            const inset = 0.04 + Math.random() * 0.06;
+            if (side < 2) { x = this.w * (side ? 1 - inset : inset); y = this.h * (0.2 + Math.random() * 0.6); }
+            else { y = this.h * (side === 2 ? inset : 1 - inset); x = this.w * (0.2 + Math.random() * 0.6); }
+          }
+          const distance = Math.hypot(x - o.x, y - o.y);
+          if (distance < Math.min(L * 0.28, this.w * 0.2)) continue;
+          const bearing = wrapAngle(Math.atan2(y - o.y, x - o.x) - o.heading);
+          const sameTurn = Math.sign(bearing) === Math.sign(this.turnMemory);
+          let recent = 0;
+          for (const p of this.visited) recent += Math.exp(-((x - p.x) ** 2 + (y - p.y) ** 2) / (L * L * 0.16));
+          const score = -Math.abs(distance - desiredDistance) / L - Math.abs(bearing) * 0.22 -
+            (sameTurn ? Math.min(2, Math.abs(this.turnMemory)) * 0.7 : 0) - recent * 0.2 +
+            (Math.sign(bearing) === preferredSide ? 0.25 : 0) + Math.random() * 0.3;
+          if (score > bestScore) { bestScore = score; best = { x, y }; }
         }
-        // When close to an edge, prefer an inner target so the animal turns
-        // back before it has to be hard-clamped.
-        const edgeX = Math.max(L * 0.42, this.w * 0.12);
-        const edgeY = Math.max(L * 0.42, this.h * 0.14);
-        if (
-          o.x < edgeX ||
-          o.x > this.w - edgeX ||
-          o.y < edgeY ||
-          o.y > this.h - edgeY
-        ) {
-          tx = tx * 0.45 + this.w * 0.5 * 0.55;
-          ty = ty * 0.45 + this.h * 0.5 * 0.55;
-        }
-        this.target = {
-          x: clamp(tx, 8, this.w - 8),
-          y: clamp(ty, 8, this.h - 8),
-        };
-        this.targetAt = this.clock + 11 + Math.random() * 7;
+        this.target = best || { x: this.w * 0.5, y: this.h * 0.5 };
+        this.visited.push({ x: o.x, y: o.y });
+        if (this.visited.length > 6) this.visited.shift();
+        this.closestTarget = Math.hypot(this.target.x - o.x, this.target.y - o.y);
+        this.targetPassing = 0;
+        const travelTime = this.closestTarget / Math.max(12, o.speed);
+        this.targetAt = this.clock + clamp(travelTime * (excursion ? 1.65 : 1.1) + 8 + Math.random() * 12, 16, 100);
+        if (excursion) this.nextExcursion = this.targetAt + 35 + Math.random() * 65;
+        this.cruiseSpeed = 12 + Math.random() * 10.5;
+        this.depthTarget = 0.08 + Math.random() * 0.56;
+        this.rollTarget = (Math.random() - 0.5) * 0.09;
+        this.cadence = 0.9 + Math.random() * 0.22;
       }
 
-      spawnTailRipple(x, y, heading) {
-        const t = performance.now();
-        const k =
-          1 +
-          0.5 * (this.speedNorm || 0) +
-          0.8 *
-            clamp(Math.abs(this.turnRate || 0) / 0.1, 0, 1.2);
-        this.tailRipples.push({
-          x,
-          y,
-          heading,
-          t0: t,
-          rmax: (14 + Math.random() * 16) * k,
-          life: 0.9 + Math.random() * 0.6,
-          seed: Math.random() * 1000,
-          strength: k,
-        });
-        if (this.tailRipples.length > 9) this.tailRipples.shift();
+      waterCurrent() {
+        return {
+          x: -1.8 + 0.45 * Math.sin(this.clock * 0.035 + this.waterSeed),
+          y: -0.65 + 0.25 * Math.cos(this.clock * 0.027 + this.waterSeed),
+        };
+      }
+
+      // Posterior dorsoventral strokes and pectoral control follow Fish et al.
+      // (2003), doi:10.1111/j.1748-7692.2003.tb01318.x. Height, roll and pitch
+      // are projected together; all emitters use that same articulated surface.
+      bodyColumn(u, out = {}) {
+        const rear = 1 - smooth(0.08, 0.72, u);
+        const tail = 1 - smooth(0.08, 0.2, u);
+        const phase = this.wave - (1 - u) * 1.15;
+        const heave = Math.sin(phase) * 0.115 * rear * rear * this.strokeGain;
+        const pitch = Math.cos(phase - 0.25) * 0.55 * this.strokeGain;
+        out.x = tail * (u - 0.11) * (Math.cos(pitch) - 1);
+        out.y = this.curvature * (u - 0.5) * (u - 0.5) * 0.075;
+        out.z = heave + tail * (u - 0.11) * Math.sin(pitch);
+        out.fin = smooth(0.53, 0.61, u) * (1 - smooth(0.73, 0.8, u));
+        out.trim = Math.cos(this.wave - 1.3) * this.strokeGain * 0.012;
+        out.normal = Math.cos(phase) * rear * this.strokeGain * 0.55;
+        out.heave = heave;
+        out.pitch = pitch;
+        out.rear = rear;
+        return out;
+      }
+
+      bodyPose(u, v = 0, out = {}, column = this.bodyColumn(u), finTip = smooth(0.085, 0.22, Math.abs(v))) {
+        const fin = finTip * column.fin;
+        const side = Math.sign(v);
+        out.x = column.x + fin * (-0.018 * Math.abs(this.bank) + side * this.bank * 0.022);
+        out.y = column.y;
+        out.z = column.z + fin * (column.trim + side * this.bank * 0.045);
+        out.width = 1;
+        out.heave = column.heave;
+        out.pitch = column.pitch;
+        out.rear = column.rear;
+        return out;
+      }
+
+      projectionFrame() {
+        // Fixed, near-overhead camera. Small bank angles keep the full dorsal
+        // silhouette readable instead of showing a side-on paper-thin surface.
+        const yaw = Math.atan2(Math.sin(this.orca.heading) / CAMERA_PLANE, Math.cos(this.orca.heading));
+        const roll = clamp(this.bank * 0.17 + this.rollDrift, -0.22, 0.22);
+        const pitch = clamp(this.pitch, -0.1, this.phase === 'dive' ? 0.36 : 0.1);
+        const c = Math.cos(yaw), s = Math.sin(yaw), cr = Math.cos(roll), sr = Math.sin(roll);
+        const cp = Math.cos(pitch), sp = Math.sin(pitch);
+        const xx = cp * c, xy = sr * sp * c - cr * s, xz = cr * sp * c + sr * s;
+        const yx = cp * s, yy = sr * sp * s + cr * c, yz = cr * sp * s - sr * c;
+        const zx = -sp, zy = sr * cp, zz = cr * cp;
+        return {
+          c, s, cr, sr, cp, sp, plane: CAMERA_PLANE, lift: CAMERA_LIFT,
+          L: this.baseL * this.poseScale, x: this.orca.x, y: this.orca.y,
+          depth: this.depth * 0.19,
+          xx, xy, xz,
+          yx: yx * CAMERA_PLANE - zx * CAMERA_LIFT,
+          yy: yy * CAMERA_PLANE - zy * CAMERA_LIFT,
+          yz: yz * CAMERA_PLANE - zz * CAMERA_LIFT,
+          vx: yx * CAMERA_LIFT + zx * CAMERA_PLANE,
+          vy: yy * CAMERA_LIFT + zy * CAMERA_PLANE,
+          vz: yz * CAMERA_LIFT + zz * CAMERA_PLANE,
+          zx, zy, zz,
+          lx: -xx * 0.34 - yx * 0.42 + zx * 0.84,
+          ly: -xy * 0.34 - yy * 0.42 + zy * 0.84,
+          lz: -xz * 0.34 - yz * 0.42 + zz * 0.84,
+        };
+      }
+
+      projectPoint(u, v, z, frame, pose = this.bodyPose(u, v), out = {}) {
+        const x = u - 0.5 + pose.x;
+        const y = v + pose.y;
+        const height = z + pose.z;
+        out.x = frame.x + (x * frame.xx + y * frame.xy + height * frame.xz) * frame.L;
+        out.y = frame.y + (x * frame.yx + y * frame.yy + height * frame.yz + frame.depth * CAMERA_LIFT) * frame.L;
+        out.z = x * frame.zx + y * frame.zy + height * frame.zz - frame.depth;
+        out.view = x * frame.vx + y * frame.vy + height * frame.vz;
+        return out;
+      }
+
+      bodyPoint(u, v = 0) {
+        return this.projectPoint(u, v, surfaceHeight(u, v), this.projectionFrame());
+      }
+
+      spawnTailRipple() {
+        const L = this.baseL * this.poseScale;
+        const flow = this.waterCurrent();
+        const heading = this.orca.heading;
+        // A paired wake is shed into world space at the actual fluke tips.
+        // Its direction and strength stay those of the stroke that made it.
+        for (const side of [-1, 1]) {
+          const point = this.bodyPoint(0.065, side * 0.115);
+          this.tailRipples.push({
+            ...point, heading, side, t0: this.clock,
+            vx: flow.x - Math.cos(heading) * (3 + this.strokeGain * 4),
+            vy: flow.y - Math.sin(heading) * (3 + this.strokeGain * 4),
+            rmax: L * (0.045 + this.strokeGain * 0.045),
+            life: 6.5 + this.strokeGain,
+            strength: this.strokeGain * (1.15 - this.depth * 0.6),
+          });
+        }
+        if (this.tailRipples.length > 16) this.tailRipples.splice(0, this.tailRipples.length - 16);
       }
 
       updateCruise(dt) {
         const o = this.orca;
-        if (!o) return;
         const L = this.baseL * this.poseScale;
-        if (!this.target || this.clock > this.targetAt) this.pickTarget();
-        let dx = this.target.x - o.x;
-        let dy = this.target.y - o.y;
-        if (Math.hypot(dx, dy) < L * 0.28) {
+        const distance = this.target ? Math.hypot(this.target.x - o.x, this.target.y - o.y) : Infinity;
+        this.targetPassing = distance > this.closestTarget + L * 0.04 ? this.targetPassing + dt : 0;
+        this.closestTarget = Math.min(this.closestTarget, distance);
+        // Passing a destination ends the leg. Continuing to chase a missed
+        // point was a source of sustained circles around that point.
+        const arrival = Math.max(L * 0.18, o.speed / 0.19 * 1.15);
+        if (this.crossing && (distance < arrival || this.clock > this.targetAt ||
+          (this.targetPassing > 1.2 && this.closestTarget < L * 0.4))) {
+          this.crossing = false;
+          this.crossingCooldown = this.clock + 8;
           this.pickTarget();
-          dx = this.target.x - o.x;
-          dy = this.target.y - o.y;
+        } else if (!this.crossing && (!this.target || this.clock > this.targetAt ||
+          distance < L * (this.excursion ? 0.15 : 0.2) ||
+          (this.excursion && Math.min(o.x, this.w - o.x, o.y, this.h - o.y) < L * 0.26) ||
+          this.targetPassing > (this.excursion ? 3.5 : 1.8))) {
+          this.pickTarget();
         }
-        const desired = Math.atan2(dy, dx);
-        let diff = wrapAngle(desired - o.heading);
-        diff +=
-          Math.sin(this.clock * 0.55 + this.wanderPhase) * 0.1 +
-          Math.sin(this.clock * 0.21 + 2.1) * 0.05;
-        // Softly turn back before reaching the hard screen edge.
-        const edgePad = Math.max(L * 0.22, 70);
-        if (
-          o.x < edgePad ||
-          o.x > this.w - edgePad ||
-          o.y < edgePad ||
-          o.y > this.h - edgePad
-        ) {
-          const inward = Math.atan2(this.h * 0.5 - o.y, this.w * 0.5 - o.x);
-          diff += wrapAngle(inward - o.heading) * 0.6;
+        if (!this.crossing && this.clock > this.crossingCooldown && Math.abs(this.turnRun) > (this.excursion ? 2.25 : this.turnBudget)) {
+          this.crossing = true;
+          this.excursion = false;
+          this.intentTurn = -Math.sign(this.turnRun);
+          this.target = { x: this.w * (0.4 + Math.random() * 0.2), y: this.h * (0.4 + Math.random() * 0.2) };
+          this.targetAt = this.clock + 70;
+          this.closestTarget = Infinity;
+          this.targetPassing = 0;
         }
-        const maxTurn = 0.1;
-        o.heading = wrapAngle(
-          o.heading + clamp(diff, -maxTurn * dt, maxTurn * dt),
-        );
+        const dx = this.target.x - o.x;
+        const dy = this.target.y - o.y;
+        const dist = Math.hypot(dx, dy) || 1;
+        let aimX = dx / dist;
+        let aimY = dy / dist;
+        const look = L * (this.excursion ? 0.23 : 0.33) + o.speed * 2.4;
+        const px = o.x + Math.cos(o.heading) * look;
+        const py = o.y + Math.sin(o.heading) * look;
+        const margin = this.excursion ? 0.28 : 0.45;
+        const padX = Math.min(L * margin, this.w * 0.27);
+        const padY = Math.min(L * margin, this.h * 0.27);
+        const pushX = (Math.max(0, padX - px) - Math.max(0, px - this.w + padX)) / padX;
+        const pushY = (Math.max(0, padY - py) - Math.max(0, py - this.h + padY)) / padY;
+        aimX += pushX * 2.6;
+        aimY += pushY * 2.6;
+        let diff = wrapAngle(Math.atan2(aimY, aimX) - o.heading);
+        // The turn-rate limit sets a physical minimum radius, particularly in
+        // small windows. Use it in the boundary prediction as well as steering.
+        const radius = Math.max(o.speed / 0.19, 55, Math.min(L * (this.crossing ? 0.21 : 0.27), Math.min(this.w, this.h) * 0.19));
+        const nearEdge = Math.abs(pushX) + Math.abs(pushY) > 0.1;
+        if (nearEdge && Math.abs(diff) > 0.8) {
+          const cost = side => {
+            const angle = side * diff >= 0 ? Math.abs(diff) : TWO_PI - Math.abs(diff);
+            let value = angle * 0.02 + (side * this.turnVel < 0 ? 0.025 : 0);
+            for (let i = 1; i <= 10; i += 1) {
+              const theta = Math.min(angle, Math.PI) * i / 10;
+              const h = o.heading + side * theta;
+              const x = o.x + radius * (Math.sin(h) - Math.sin(o.heading)) / side;
+              const y = o.y - radius * (Math.cos(h) - Math.cos(o.heading)) / side;
+              const outX = Math.max(0, padX * 0.7 - x, x - this.w + padX * 0.7) / L;
+              const outY = Math.max(0, padY * 0.7 - y, y - this.h + padY * 0.7) / L;
+              value += outX * outX + outY * outY;
+            }
+            return value;
+          };
+          diff = (cost(-1) < cost(1) ? -1 : 1) * Math.abs(diff);
+        } else if (Math.abs(diff) > 2.5) {
+          diff = this.intentTurn * Math.abs(diff);
+        }
+        const maxTurn = Math.min(0.19, o.speed / radius);
+        const bias = nearEdge ? 0 : clamp(this.turnMemory * 0.045, -maxTurn * 0.65, maxTurn * 0.65);
+        // After a long arc, cross the center before exploring again. Holding
+        // this destination prevents repeated replanning from becoming an orbit.
+        let desiredTurn = clamp(diff * (this.crossing ? 0.3 : 0.18) - (this.crossing ? 0 : bias), -maxTurn, maxTurn);
+        // Release a persistent turn only when a full turning radius fits
+        // inside the frame. Counter-steering breaks loops without snapping
+        // either the heading or the position.
+        if (Math.abs(this.turnRun) > 3.2 && Math.min(o.x, this.w - o.x, o.y, this.h - o.y) > radius * 1.25) {
+          desiredTurn = -Math.sign(this.turnRun) * maxTurn * 0.55;
+        }
+        const response = Math.abs(desiredTurn) > Math.abs(this.turnVel) ? 1.15 : 0.9;
+        this.turnVel += (desiredTurn - this.turnVel) * (1 - Math.exp(-dt * response));
+        this.turnRate = this.turnVel;
+        this.turnRun = this.turnRun * this.turnRate < 0 ? this.turnRate * dt : this.turnRun + this.turnRate * dt;
+        o.heading = wrapAngle(o.heading + this.turnVel * dt);
+        this.curvature += (this.turnRate / Math.max(o.speed, 1) * L - this.curvature) * (1 - Math.exp(-dt * 1.5));
+        this.turnMemory = this.turnMemory * Math.exp(-dt / 45) + this.turnRate * dt;
+        const targetBank = clamp(this.curvature * 0.32, -1, 1);
+        this.bank += (targetBank - this.bank) * (1 - Math.exp(-dt * 1.5));
+        const turnLoad = Math.abs(this.bank);
+        const desiredSpeed = this.cruiseSpeed * (1 - 0.2 * turnLoad);
+        this.depthVel += ((this.depthTarget - this.depth) * 0.2 - this.depthVel) * (1 - Math.exp(-dt * 0.8));
+        this.depth += this.depthVel * dt;
+        this.pitch += (clamp(this.depthVel * 2.8, -0.08, 0.08) - this.pitch) * (1 - Math.exp(-dt));
+        this.rollDrift += (this.rollTarget - this.rollDrift) * (1 - Math.exp(-dt * 0.32));
+        this.poseScale = 1.02 - this.depth * 0.2;
 
-        const prevHeading =
-          this.prevCruiseHeading == null
-            ? o.heading
-            : this.prevCruiseHeading;
-        const rawTurn =
-          wrapAngle(o.heading - prevHeading) / Math.max(dt, 0.0001);
-        this.prevCruiseHeading = o.heading;
-        this.turnRate += (rawTurn - this.turnRate) * Math.min(1, dt * 2.5);
-        this.speedNorm = clamp(o.speed / 26, 0, 1.6);
-
-        const targetSpeed =
-          20 +
-          4 * Math.sin(this.clock * 0.07 + this.wanderPhase) +
-          2.5 * Math.sin(this.clock * 0.019 + 1.3);
-        o.speed += (targetSpeed - o.speed) * Math.min(1, dt * 0.25);
+        if (this.gait === 'glide' && (this.clock >= this.glideUntil || o.speed < desiredSpeed * 0.58)) {
+          this.gait = 'stroke';
+          this.strokeEnd = this.wave + TWO_PI * (1 + Math.floor(Math.random() * 2));
+        }
+        if (this.gait === 'stroke') {
+          const hz = clamp(4.5 * o.speed / L, 0.13, 0.3) * this.cadence;
+          this.wave += TWO_PI * hz * dt;
+          const finish = smooth(0, 1.05, this.strokeEnd - this.wave);
+          const effort = clamp(0.8 + (desiredSpeed - o.speed) * 0.14 + turnLoad * 0.12, 0.15, 1.25);
+          this.strokeGain += (effort * finish - this.strokeGain) * (1 - Math.exp(-dt * 2.8));
+          if (this.wave >= this.strokeEnd) {
+            this.wave = this.strokeEnd;
+            this.gait = 'glide';
+            this.glideUntil = this.clock + 3.5 + Math.random() * 6;
+          }
+        } else {
+          this.strokeGain *= Math.exp(-dt * 3.2);
+        }
+        // Lift-based propulsion on both half-strokes, followed by quadratic
+        // drag. Speed changes because of the stroke, never an unrelated sine.
+        const power = Math.pow(Math.cos(this.wave - 0.85), 2);
+        this.thrust = this.strokeGain * (1.2 + desiredSpeed * desiredSpeed * 0.0042) * (0.28 + 1.32 * power);
+        const drag = 0.0033 * o.speed * o.speed * (1 + turnLoad * 0.28);
+        o.speed = Math.max(0, o.speed + (this.thrust - drag) * dt);
+        this.speedNorm = o.speed / 20;
         o.x += Math.cos(o.heading) * o.speed * dt;
         o.y += Math.sin(o.heading) * o.speed * dt;
 
-        o.x = clamp(o.x, 0, this.w);
-        o.y = clamp(o.y, 0, this.h);
-
-        const turnNorm = clamp(Math.abs(this.turnRate) / 0.1, 0, 1.4);
-        if (
-          (turnNorm > 0.35 || this.speedNorm > 1.15) &&
-          this.clock > this.nextSpray
-        ) {
-          this.nextSpray = this.clock + 0.16 + Math.random() * 0.24;
-          const hd = this.headingVisual;
-          const c = Math.cos(hd);
-          const s = Math.sin(hd);
-          const nx = -s;
-          const ny = c;
-          const side = this.turnRate >= 0 ? -1 : 1;
-          const strength = 0.5 + turnNorm * 0.7 + this.speedNorm * 0.3;
-          for (let i = 0; i < 2; i += 1) {
-            const along = -L * (0.18 + Math.random() * 0.26);
-            const off = L * (0.06 + Math.random() * 0.07) * side;
-            this.spray.push({
-              x: o.x + c * along + nx * off,
-              y: o.y + s * along + ny * off,
-              vx:
-                nx * side * (14 + Math.random() * 26) -
-                c * (6 + Math.random() * 10),
-              vy:
-                ny * side * (14 + Math.random() * 26) -
-                s * (6 + Math.random() * 10),
-              t0: this.clock,
-              life: 0.55 + Math.random() * 0.5,
-              ch: Math.random() < 0.5 ? '~' : '.',
-              strength,
-            });
+        const pulse = Math.floor((this.wave - 0.85 + Math.PI / 2) / Math.PI);
+        if (pulse !== this.tailPulse) {
+          this.tailPulse = pulse;
+          if (this.strokeGain > 0.22) this.spawnTailRipple();
+        }
+        expire(this.tailRipples, this.clock);
+        this.wakeDistance += o.speed * dt;
+        if (this.wakeDistance >= this.cw * 1.25) {
+          this.wakeDistance = 0;
+          const flow = this.waterCurrent();
+          const tail = this.bodyPoint(0.07);
+          this.trail.push({ ...tail, h: o.heading, L, t0: this.clock, life: 8, speed: this.speedNorm, bank: this.bank, effort: this.strokeGain, flow });
+          if (this.trail.length > 64) this.trail.shift();
+        }
+        expire(this.trail, this.clock);
+        // Small pressure streaks peel away from the pectorals. Underwater
+        // disturbances advect with the water, without ballistic spray/gravity.
+        if (this.clock >= this.nextSpray) {
+          this.nextSpray = this.clock + 0.45;
+          const flow = this.waterCurrent();
+          for (const side of [-1, 1]) {
+            const point = this.bodyPoint(0.65, side * 0.17);
+            this.spray.push({ ...point, vx: flow.x - Math.sin(o.heading) * side * (1 + turnLoad * 3), vy: flow.y + Math.cos(o.heading) * side * (1 + turnLoad * 3), t0: this.clock, life: 2.8, ch: side > 0 ? "'" : '.', strength: 0.25 + this.speedNorm * 0.28 + turnLoad * 0.2 });
           }
         }
-        if (this.spray.length > 24) {
-          this.spray.splice(0, this.spray.length - 24);
-        }
-        if (this.spray.length) {
-          this.spray = this.spray.filter(
-            (sp) => this.clock - sp.t0 < sp.life,
-          );
-        }
-
-        const lag = wrapAngle(o.heading - this.headingVisual);
-        this.headingVisual += lag * Math.min(1, dt * 0.95);
-
-        const depth =
-          0.98 + 0.025 * Math.sin(this.clock * 0.05 + this.seed * 0.6);
-        this.poseScale += (depth - this.poseScale) * Math.min(1, dt * 0.35);
-
-        this.wave += dt * (1.15 + o.speed / 42);
-        const bucket = Math.floor(this.wave / Math.PI);
-        if (bucket !== this.tailPulse) {
-          this.tailPulse = bucket;
-          const tailL = this.baseL * this.poseScale;
-          this.spawnTailRipple(
-            o.x - Math.cos(this.headingVisual) * tailL * 0.45,
-            o.y - Math.sin(this.headingVisual) * tailL * 0.45,
-            this.headingVisual,
-          );
-        }
-        if (this.tailRipples.length) {
-          const now = performance.now();
-          this.tailRipples = this.tailRipples.filter(
-            (r) => now - r.t0 < r.life * 1000,
-          );
-        }
+        expire(this.spray, this.clock);
       }
 
       startDive(now) {
         this.phase = 'dive';
         this.diveAt = now;
-        this.diveX = this.orca.x;
-        this.diveY = this.orca.y;
-        this.diveHeading = this.headingVisual;
+        this.diveStart = {
+          ...this.orca, bank: this.bank, depth: this.depth, pitch: this.pitch,
+          scale: this.poseScale, gain: this.strokeGain, roll: this.rollDrift,
+          curvature: this.curvature,
+        };
         this.diveProgress = 0;
         this.diveCover = 0;
+        this.diveMarks = [
+          { at: 0.22, u: 0.87, v: 0, strength: 0.6 },
+          { at: 0.62, u: 0.57, v: -0.11, strength: 0.8 },
+          { at: 0.72, u: 0.57, v: 0.11, strength: 0.8 },
+          { at: 1.13, u: 0.065, v: -0.115, strength: 1 },
+          { at: 1.13, u: 0.065, v: 0.115, strength: 1 },
+        ];
       }
 
-      spawnBubble(x, y, t0, alpha) {
-        this.bubbles.push({
-          x,
-          y,
-          t0,
-          vy: 12 + Math.random() * 26,
-          drift: 1.4 + Math.random() * 4,
-          phase: Math.random() * TWO_PI,
-          life: 1.1 + Math.random() * 1.5,
-          size: Math.random(),
-          a: alpha,
-        });
-        if (this.bubbles.length > 46) this.bubbles.shift();
+      updateDive(dt, now) {
+        const t = Math.max(0, (now - this.diveAt) / 1000);
+        const initial = this.diveStart;
+        this.diveProgress = clamp(t / 2.9, 0, 1);
+        this.diveCover = smooth(0.12, 2.9, t);
+        // Continue the incoming velocity, then decelerate below the surface.
+        // The head tucks first; the final tail stroke follows, without a roll.
+        const travel = initial.speed * 1.65 * (1 - Math.exp(-t / 1.65));
+        this.orca.x = initial.x + Math.cos(initial.heading) * travel;
+        this.orca.y = initial.y + Math.sin(initial.heading) * travel;
+        this.orca.speed = initial.speed * Math.exp(-t / 1.65);
+        this.bank = initial.bank * (1 - smooth(0, 1.2, t));
+        this.rollDrift = initial.roll * (1 - smooth(0, 1.2, t));
+        this.curvature = initial.curvature * (1 - smooth(0, 1.1, t));
+        this.pitch = initial.pitch + 0.28 * smooth(0, 0.85, t) - 0.09 * smooth(1.3, 2.7, t);
+        this.depth = initial.depth + 1.65 * smooth(0.12, 2.8, t);
+        this.poseScale = initial.scale * (1 - 0.14 * this.diveCover);
+        const kick = initial.gain + (1.05 - initial.gain) * smooth(0, 0.4, t);
+        this.strokeGain = kick * (1 - smooth(0.85, 1.85, t));
+        this.wave += dt * (2.6 - 1.2 * this.diveCover);
+        for (const mark of this.diveMarks) {
+          if (mark.emitted || t < mark.at) continue;
+          mark.emitted = true;
+          const point = this.bodyPoint(mark.u, mark.v);
+          this.surfaceRipples.push({ x: point.x, y: point.y, t0: this.clock,
+            heading: initial.heading, strength: mark.strength,
+            life: 2.6, size: this.baseL * 0.11, flow: this.waterCurrent() });
+        }
+        if (t >= 2.9) this.phase = 'after';
       }
 
       loop(now) {
+        this.raf = 0;
+        if (!this.host || !this.ctx || document.hidden) return;
         this.raf = requestAnimationFrame(this.boundLoop);
-        if (!this.host || !this.ctx) return;
-        if (now - this.lastDraw < 38) return;
-        const dt = Math.min(0.05, this.last ? (now - this.last) / 1000 : 0.016);
+        if (now - this.lastDraw < 1000 / 30 - 0.5) return;
+        const elapsed = Math.min(0.1, Math.max(0, (now - this.last) / 1000));
         this.last = now;
+        const steps = Math.max(1, Math.ceil(elapsed / (1 / 60)));
+        for (let i = 0; i < steps; i += 1) this.update(elapsed / steps, now);
         this.lastDraw = now;
-        this.update(dt, now);
         this.draw(now);
         if (this.phase === 'done') this.destroy();
       }
@@ -635,34 +851,10 @@ window.__ModuleLoader__.load({
 
         if (this.phase === 'enter' || this.phase === 'cruise') {
           this.updateCruise(dt);
-          if (now - this.lastTrail > 120) {
-            this.lastTrail = now;
-            this.trail.push({
-              x: this.orca.x,
-              y: this.orca.y,
-              h: this.headingVisual,
-              L: this.baseL * this.poseScale,
-              t: now,
-            });
-            if (this.trail.length > 42) this.trail.shift();
-          }
-          while (this.trail.length && now - this.trail[0].t > 3000) this.trail.shift();
-          if (now > this.lastBubble && since > 700) {
-            this.lastBubble = now + 700 + Math.random() * 1200;
-            const headX = this.orca.x + Math.cos(this.headingVisual) * this.baseL * 0.34;
-            const headY = this.orca.y + Math.sin(this.headingVisual) * this.baseL * 0.34;
-            this.spawnBubble(headX, headY, now, 0.34);
-          }
         }
 
         if (this.phase === 'dive') {
-          this.wave += dt * (1.6 + 2.2 * this.diveCover);
-          this.diveProgress = clamp((now - this.diveAt) / 3000, 0, 1);
-          this.diveCover = smooth(0.03, 1, this.diveProgress);
-          if (this.diveProgress >= 1) {
-            this.phase = 'after';
-            this.diveCover = 1;
-          }
+          this.updateDive(dt, now);
         } else if (this.phase === 'after') {
           this.diveProgress = 1;
           this.diveCover = 1;
@@ -670,21 +862,16 @@ window.__ModuleLoader__.load({
           this.diveProgress = 0;
           this.diveCover = 0;
         }
+        if (this.phase === 'after' && now - this.diveAt > 3850) this.phase = 'done';
+        expire(this.surfaceRipples, this.clock);
 
-        if (this.phase === 'after' && now - this.diveAt > 3450) {
-          this.phase = 'done';
-        }
-
-        if (this.bubbles.length) {
-          this.bubbles = this.bubbles.filter((b) => now - b.t0 < b.life * 1000);
-        }
 
       }
 
       sceneAlpha(now) {
         if (this.phase === 'after' || this.phase === 'dive') {
           const since = (now - this.diveAt) / 1000;
-          return 1 - smooth(2.65, 3.4, since);
+          return 1 - smooth(2.9, 3.8, since);
         }
         return 1;
       }
@@ -693,28 +880,29 @@ window.__ModuleLoader__.load({
         const ctx = this.ctx;
         if (!ctx || this.w < 10) return;
         ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-        ctx.clearRect(0, 0, this.w, this.h);
         const pal = palette(this.dark);
         const fade = this.sceneAlpha(now);
         const enter = this.enter;
         const alpha = enter * fade;
-        this.drawWater(now, pal, alpha);
+        const grid = this.waterGrid;
+        // The slow ambient sea is sampled at 15 Hz; the animal and wake remain
+        // at 30 Hz. Repaint the previous foreground from character data, with
+        // no full-screen bitmap cache or repeated full-screen text rasterization.
+        if (this.phase === 'cruise' && alpha === 1 && grid && grid.paintTheme === this.dark && grid.paintAlpha === alpha &&
+          this.clock >= grid.paintClock && this.clock - grid.paintClock < 1 / 15 - 0.001) {
+          this.restoreWater(pal);
+        } else {
+          ctx.clearRect(0, 0, this.w, this.h);
+          this.drawWater(now, pal, alpha);
+        }
+        this.damage.x0 = this.damage.y0 = Infinity;
+        this.damage.x1 = this.damage.y1 = -Infinity;
         this.drawWake(now, pal, alpha);
         if (this.phase !== 'after') this.drawOrca(now, pal, alpha);
         this.drawSpray(now, pal, alpha);
 
-        // The surface water sweeps in front of the animal as it goes under.
-        const cover =
-          this.phase === 'dive'
-            ? this.diveCover
-            : this.phase === 'after'
-              ? 1
-              : 0;
-        if (cover > 0.004) {
-          this.drawWater(now, pal, alpha * cover * 0.45);
-        }
+        // Local surface disturbances persist after the silhouette has sunk.
         this.drawDiveRings(now, pal, alpha);
-        this.drawBubbles(now, pal, alpha);
         ctx.globalAlpha = 1;
       }
 
@@ -724,319 +912,316 @@ window.__ModuleLoader__.load({
         this.clock = 2.2;
         if (!this.orca) this.seedOrca();
         this.poseScale = 0.96;
-        this.wave = 1.2;
+        this.wave = 0;
+        this.strokeGain = 0;
         this.draw(performance.now());
+      }
+
+      waterDensity(px, py, t = this.clock) {
+        const seed = this.waterSeed;
+        const driftX = t * 1.8;
+        const driftY = t * 0.65;
+        const wx =
+          px +
+          driftX +
+          40 * Math.sin(py * 0.006 + t * 0.08 + seed * 0.2) +
+          16 * Math.sin(py * 0.018 - t * 0.12);
+        const wy =
+          py +
+          driftY +
+          34 * Math.cos(px * 0.005 - t * 0.07) +
+          14 * Math.cos(px * 0.016 + t * 0.1);
+        const flowA = 0.45 + 0.18 * Math.sin(seed + t * 0.025);
+        const ca = Math.cos(flowA);
+        const sa = Math.sin(flowA);
+        const u = wx * ca + wy * sa;
+        const v = -wx * sa + wy * ca;
+        const n =
+          Math.sin(u * 0.01 + t * 0.14) * 0.9 +
+          Math.sin(v * 0.016 - t * 0.11 + 1.6) * 0.6 +
+          Math.sin((u + v) * 0.005 + t * 0.08 + 4.0) * 0.4 +
+          Math.sin((u - v) * 0.021 - t * 0.16 + 2.2) * 0.18;
+        const ridge = 1 - Math.min(1, Math.abs(n) / 1.75);
+        const mask =
+          0.55 +
+          0.45 *
+            Math.sin(wx * 0.0032 - wy * 0.0021 + t * 0.04 + 1.3);
+        return smooth(0.5, 0.97, ridge) * mask;
+      }
+
+      prepareWater() {
+        const cols = this.cols;
+        const rows = this.rows;
+        let grid = this.waterGrid;
+        if (grid && grid.cols === cols && grid.rows === rows && grid.cw === this.cw && grid.ch === this.ch) return grid;
+        const count = cols * rows;
+        // The field is smooth between adjacent characters. Sample it once per
+        // 2x2 cells, then interpolate; static grain and jitter never need hashing again.
+        const fc = Math.ceil(cols / 2) + 1;
+        const fr = Math.ceil(rows / 2) + 1;
+        grid = this.waterGrid = { cols, rows, cw: this.cw, ch: this.ch, fc, fr,
+          x: new Float32Array(count), y: new Float32Array(count), grain: new Float32Array(count),
+          sample: new Int32Array(count), fx: new Float32Array(count), fy: new Float32Array(count),
+          field: new Float32Array(fc * fr),
+          fieldFrom: new Float32Array(fc * fr), fieldTo: new Float32Array(fc * fr),
+          fieldAt: -Infinity, fieldSeed: this.waterSeed,
+          bendX: new Float32Array(count), bendY: new Float32Array(count),
+          energy: new Float32Array(count), boost: new Float32Array(count),
+          glyphs: new Uint8Array(count), opacity: new Float32Array(count),
+          paintClock: -Infinity, paintTheme: this.dark, paintAlpha: 0 };
+        for (let r = 1; r < rows; r += 1) {
+          for (let c = 1; c < cols; c += 1) {
+            const k = r * cols + c;
+            const x = c * this.cw + (hash2(c + 2, r + 7) - 0.5) * this.cw * 0.9;
+            const y = r * this.ch + (hash2(c + 9, r + 3) - 0.5) * this.ch * 0.9;
+            grid.x[k] = x; grid.y[k] = y;
+            grid.grain[k] = hash2(c + 13, r + 29);
+            const gx = x / (this.cw * 2), gy = y / (this.ch * 2);
+            grid.sample[k] = Math.floor(gy) * fc + Math.floor(gx);
+            grid.fx[k] = gx % 1; grid.fy[k] = gy % 1;
+          }
+        }
+        return grid;
+      }
+
+      updateWaterField(grid) {
+        const interval = 0.1;
+        const t = this.clock;
+        const { fc, fr } = grid;
+        const sample = (field, time) => {
+          for (let r = 0; r < fr; r += 1) {
+            for (let c = 0; c < fc; c += 1) field[r * fc + c] = this.waterDensity(c * this.cw * 2, r * this.ch * 2, time);
+          }
+        };
+        // The original water drifts slowly. Interpolate two nearby time samples
+        // at the full animation rate, instead of repeating trigonometry each frame.
+        if (grid.fieldSeed !== this.waterSeed || t < grid.fieldAt || t >= grid.fieldAt + interval * 2) {
+          grid.fieldAt = t;
+          grid.fieldSeed = this.waterSeed;
+          sample(grid.fieldFrom, t);
+          sample(grid.fieldTo, t + interval);
+        } else if (t >= grid.fieldAt + interval) {
+          const previous = grid.fieldFrom;
+          grid.fieldFrom = grid.fieldTo;
+          grid.fieldTo = previous;
+          grid.fieldAt += interval;
+          sample(grid.fieldTo, grid.fieldAt + interval);
+        }
+        const mix = clamp((t - grid.fieldAt) / interval, 0, 1);
+        for (let i = 0; i < grid.field.length; i += 1) {
+          grid.field[i] = grid.fieldFrom[i] + (grid.fieldTo[i] - grid.fieldFrom[i]) * mix;
+        }
+      }
+
+      waterAt(grid, x, y) {
+        const gx = clamp(x / (this.cw * 2), 0, grid.fc - 1.001);
+        const gy = clamp(y / (this.ch * 2), 0, grid.fr - 1.001);
+        const k = Math.floor(gy) * grid.fc + Math.floor(gx);
+        const fx = gx % 1, fy = gy % 1, f = grid.field;
+        const a = f[k] + (f[k + 1] - f[k]) * fx;
+        const b = f[k + grid.fc] + (f[k + grid.fc + 1] - f[k + grid.fc]) * fx;
+        return a + (b - a) * fy;
+      }
+
+      disturbWater(grid, x, y, rx, ry, visit) {
+        const c0 = Math.max(1, Math.floor((x - rx) / this.cw) - 1);
+        const c1 = Math.min(grid.cols - 1, Math.ceil((x + rx) / this.cw) + 1);
+        const r0 = Math.max(1, Math.floor((y - ry) / this.ch) - 1);
+        const r1 = Math.min(grid.rows - 1, Math.ceil((y + ry) / this.ch) + 1);
+        for (let r = r0; r <= r1; r += 1) {
+          for (let c = c0; c <= c1; c += 1) {
+            const k = r * grid.cols + c;
+            visit(k, grid.x[k] - x, grid.y[k] - y);
+          }
+        }
+      }
+
+      paintGlyph(ctx, glyph, x, y) {
+        ctx.fillText(glyph, x, y);
+        const d = this.damage, pad = this.ch;
+        if (x - pad < d.x0) d.x0 = x - pad;
+        if (y - pad < d.y0) d.y0 = y - pad;
+        if (x + pad > d.x1) d.x1 = x + pad;
+        if (y + pad > d.y1) d.y1 = y + pad;
+      }
+
+      restoreWater(pal) {
+        const d = this.damage;
+        if (d.x0 > d.x1 || d.y0 > d.y1) return;
+        const grid = this.waterGrid, ctx = this.ctx;
+        // Align the single clip rectangle to device pixels so its edge never
+        // accumulates translucent antialiasing over repeated redraws.
+        const x0 = Math.floor(d.x0 * this.dpr) / this.dpr;
+        const y0 = Math.floor(d.y0 * this.dpr) / this.dpr;
+        const x1 = Math.ceil(d.x1 * this.dpr) / this.dpr;
+        const y1 = Math.ceil(d.y1 * this.dpr) / this.dpr;
+        ctx.save();
+        ctx.beginPath(); ctx.rect(x0, y0, x1 - x0, y1 - y0); ctx.clip();
+        ctx.clearRect(x0, y0, x1 - x0, y1 - y0);
+        ctx.font = `500 ${Math.max(4, Math.round(this.ch * 0.78))}px ${MONO}`;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillStyle = `rgb(${pal.water})`;
+        const c0 = Math.max(1, Math.floor((x0 - this.ch) / this.cw));
+        const c1 = Math.min(grid.cols - 1, Math.ceil((x1 + this.ch) / this.cw));
+        const r0 = Math.max(1, Math.floor(y0 / this.ch) - 1);
+        const r1 = Math.min(grid.rows - 1, Math.ceil(y1 / this.ch) + 1);
+        for (let r = r0; r <= r1; r++) {
+          for (let c = c0; c <= c1; c++) {
+            const k = r * grid.cols + c;
+            if (!grid.glyphs[k]) continue;
+            ctx.globalAlpha = grid.opacity[k];
+            ctx.fillText(WATER_GLYPHS[grid.glyphs[k] - 1], grid.x[k], grid.y[k]);
+          }
+        }
+        ctx.restore();
       }
 
       drawWater(now, pal, alpha) {
         if (alpha <= 0.01) return;
+        const grid = this.prepareWater();
+        grid.glyphs.fill(0);
+        grid.paintClock = this.clock;
+        grid.paintTheme = this.dark;
+        grid.paintAlpha = alpha;
+        const { field, fc, bendX, bendY, energy, boost } = grid;
+        bendX.fill(0); bendY.fill(0); energy.fill(0); boost.fill(0);
+        this.updateWaterField(grid);
+        // Local effects visit their own rectangles, instead of checking every
+        // vortex and ring against every character in the viewport.
+        const o = this.orca;
+        const L = this.baseL * this.poseScale;
+        if (o && (this.phase === 'cruise' || this.phase === 'enter' || this.phase === 'dive')) {
+          const ca = Math.cos(o.heading), sa = Math.sin(o.heading);
+          const length = L * 0.53, width = L * 0.15;
+          const gain = clamp(o.speed / 20, 0, 1.5) * Math.exp(-this.depth * 1.3);
+          const rx = 2 * Math.hypot(length * ca, width * sa);
+          const ry = 2 * Math.hypot(length * sa, width * ca);
+          this.disturbWater(grid, o.x, o.y, rx, ry, (k, dx, dy) => {
+            const along = dx * ca + dy * sa, across = -dx * sa + dy * ca;
+            const q2 = (along / length) ** 2 + (across / width) ** 2;
+            if (q2 > 4) return;
+            const shoulder = Math.exp(-(((Math.sqrt(q2) - 1.05) / 0.26) ** 2)) * gain;
+            const side = Math.sign(across) || 1;
+            const pressure = shoulder * (13 + 4 * side * this.bank);
+            bendX[k] += -sa * side * pressure + ca * pressure * 0.25;
+            bendY[k] += ca * side * pressure + sa * pressure * 0.25;
+            energy[k] += shoulder * 0.1;
+            boost[k] += shoulder * 0.7;
+          });
+        }
+        for (const r of this.tailRipples) {
+          const age = this.clock - r.t0, life = age / r.life;
+          if (life < 0 || life >= 1) continue;
+          const radius = 8 + r.rmax * Math.sqrt(life);
+          const gain = Math.pow(1 - life, 1.4) * r.strength;
+          this.disturbWater(grid, r.x + r.vx * age, r.y + r.vy * age, radius * 2, radius * 2, (k, dx, dy) => {
+            const q2 = (dx * dx + dy * dy) / (radius * radius);
+            if (q2 > 4) return;
+            const ring = Math.exp(-(((Math.sqrt(q2) - 1) / 0.3) ** 2)) * gain;
+            const swirl = Math.exp(-q2 * 1.6) * gain * r.side * 0.5;
+            bendX[k] -= dy * swirl; bendY[k] += dx * swirl;
+            energy[k] += ring * 0.26; boost[k] += ring * 1.1;
+          });
+        }
+        for (const r of this.surfaceRipples) {
+          const age = this.clock - r.t0, life = age / r.life;
+          if (life < 0 || life >= 1) continue;
+          const radius = 5 + r.size * Math.sqrt(life);
+          const gain = r.strength * Math.pow(1 - life, 1.4);
+          this.disturbWater(grid, r.x + r.flow.x * age, r.y + r.flow.y * age, radius + 22, radius + 22, (k, dx, dy) => {
+            const dist = Math.hypot(dx, dy) || 1;
+            if (Math.abs(dist - radius) > 22) return;
+            const crest = Math.exp(-(((dist - radius) / 9) ** 2)) * gain;
+            bendX[k] += dx / dist * crest * 10; bendY[k] += dy / dist * crest * 10;
+            energy[k] += crest * 0.26; boost[k] += crest;
+          });
+        }
         const ctx = this.ctx;
-        const t = this.clock;
-        const seed = this.waterSeed;
         ctx.save();
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        // The water grain is deliberately finer than the animal.
         ctx.font = `500 ${Math.max(4, Math.round(this.ch * 0.78))}px ${MONO}`;
         ctx.fillStyle = `rgb(${pal.water})`;
-
-        const driftX = t * 4;
-        const driftY = t * 2;
-        const dCover =
-          this.phase === 'dive'
-            ? this.diveCover
-            : this.phase === 'after'
-              ? 1
-              : 0;
-
-        // Long, thin, warped level-set ribbons. Dense characters inside the
-        // ribbon, feathered at its edge: reads as moving water rather than
-        // isolated specks or large blocks.
-        const field = (px, py) => {
-          const wx =
-            px +
-            driftX +
-            36 * Math.sin(py * 0.007 + t * 0.11 + seed * 0.3) +
-            14 * Math.sin(py * 0.021 - t * 0.17);
-          const wy =
-            py +
-            driftY +
-            32 * Math.cos(px * 0.006 - t * 0.09) +
-            12 * Math.cos(px * 0.018 + t * 0.15);
-          const a = wx * 0.0075 + wy * 0.0035;
-          const b = wx * 0.0025 - wy * 0.0095;
-          return (
-            Math.sin(a + t * 0.16 + seed) * 0.62 +
-            Math.sin(b - t * 0.13 + 1.7) * 0.52 +
-            Math.sin((wx + wy) * 0.006 + t * 0.1 + 4.0) * 0.3 +
-            Math.sin((wx - wy) * 0.016 - t * 0.2 + 2.2) * 0.14
-          );
-        };
-        const densityAt = (px, py) => {
-          const wx =
-            px +
-            driftX +
-            40 * Math.sin(py * 0.006 + t * 0.08 + seed * 0.2) +
-            16 * Math.sin(py * 0.018 - t * 0.12);
-          const wy =
-            py +
-            driftY +
-            34 * Math.cos(px * 0.005 - t * 0.07) +
-            14 * Math.cos(px * 0.016 + t * 0.1);
-          const flowA = 0.45 + 0.18 * Math.sin(seed + t * 0.025);
-          const ca = Math.cos(flowA);
-          const sa = Math.sin(flowA);
-          const u = wx * ca + wy * sa;
-          const v = -wx * sa + wy * ca;
-          const n =
-            Math.sin(u * 0.01 + t * 0.14) * 0.9 +
-            Math.sin(v * 0.016 - t * 0.11 + 1.6) * 0.6 +
-            Math.sin((u + v) * 0.005 + t * 0.08 + 4.0) * 0.4 +
-            Math.sin((u - v) * 0.021 - t * 0.16 + 2.2) * 0.18;
-          const ridge = 1 - Math.min(1, Math.abs(n) / 1.75);
-          const mask =
-            0.55 +
-            0.45 *
-              Math.sin(wx * 0.0032 - wy * 0.0021 + t * 0.04 + 1.3);
-          return smooth(0.5, 0.97, ridge) * mask;
-        };
-
-        for (let r = 1; r < this.rows; r += 1) {
-          for (let c = 1; c < this.cols; c += 1) {
-            const hh = hash2(c + 13, r + 29);
-            let x =
-              c * this.cw + (hash2(c + 2, r + 7) - 0.5) * this.cw * 0.9;
-            let y =
-              r * this.ch + (hash2(c + 9, r + 3) - 0.5) * this.ch * 0.9;
-            let waveBoost = 0;
-            let suppress = 1;
-
-            if (dCover > 0) {
-              const Ld = this.baseL * this.poseScale;
-              const cyd = this.diveY + Ld * 0.24 * dCover;
-              const ddx = x - this.diveX;
-              const ddy = y - cyd;
-              const dist = Math.hypot(ddx, ddy) || 1;
-              const ringR = Ld * (0.2 + 0.45 * dCover);
-              const env = Math.exp(
-                -Math.pow((dist - ringR) / (Ld * 0.13), 2),
-              );
-              const env2 = Math.exp(
-                -Math.pow((dist - ringR * 1.55) / (Ld * 0.16), 2),
-              );
-              const inner = Math.exp(-Math.pow(dist / (Ld * 0.2), 2));
-              const amp =
-                Math.sin(dist * 0.045 - this.clock * 5.2 + this.waterSeed) *
-                20 *
-                env *
-                dCover;
-              x += (ddx / dist) * amp;
-              y += (ddy / dist) * amp;
-              waveBoost =
-                env * 1.25 * dCover +
-                env2 * 0.5 * dCover -
-                inner * 0.55 * dCover;
-            } else if (
-              this.phase === 'enter' ||
-              this.phase === 'cruise'
-            ) {
-              const o = this.orca;
-              if (o) {
-                const Ld = this.baseL * this.poseScale;
-                const hd = this.headingVisual;
-                const cA = Math.cos(hd);
-                const sA = Math.sin(hd);
-                const ddx = x - o.x;
-                const ddy = y - o.y;
-                const along = ddx * cA + ddy * sA;
-                const across = -ddx * sA + ddy * cA;
-                const q = Math.sqrt(
-                  Math.pow(along / (Ld * 0.62), 2) +
-                    Math.pow(across / (Ld * 0.24), 2),
-                );
-                if (q < 2.4) {
-                  const env = Math.exp(-Math.pow((q - 0.9) / 0.6, 2));
-                  const speedN = this.speedNorm || 0;
-                  const turnN = clamp(
-                    Math.abs(this.turnRate || 0) / 0.1,
-                    0,
-                    1.5,
-                  );
-                  const amp = (4 + 10 * speedN + 10 * turnN) * env;
-                  const dist = Math.hypot(ddx, ddy) || 1;
-                  x += (ddx / dist) * amp;
-                  y += (ddy / dist) * amp;
-                  waveBoost =
-                    env * (0.5 + 0.6 * speedN + 0.9 * turnN) +
-                    (along < 0 ? env * 0.3 * speedN : 0);
-                  if (turnN > 0.4) {
-                    const sideSign = (this.turnRate || 0) >= 0 ? 1 : -1;
-                    if (across * sideSign > 0) waveBoost *= 1.5;
-                  }
-                }
-                // Calm water around the swimming animal so its silhouette
-                // does not compete with the surface texture.
-                const qb = Math.sqrt(
-                  Math.pow(along / (Ld * 0.62), 2) +
-                    Math.pow(across / (Ld * 0.28), 2),
-                );
-                suppress = 0.35 + 0.65 * smooth(0.8, 1.6, qb);
-              }
-            }
-
-            let d = densityAt(x, y);
-            if (d < 0.06) continue;
-            if (hh > 0.18 + d * 0.82 * suppress) continue;
-            d *= suppress;
-            const qq = clamp(d, 0, 1);
-            const glyph =
-              qq > 0.66
-                ? hh < 0.55
-                  ? '~'
-                  : '='
-                : qq > 0.42
-                  ? hh < 0.6
-                    ? '-'
-                    : '~'
-                  : hh < 0.7
-                    ? '.'
-                    : "'";
-            const a =
-              (0.035 + qq * 0.31) *
-              alpha *
-              (this.dark ? 1 : 0.75) *
-              (1 + waveBoost) *
-              (0.7 + hh * 0.45);
-            if (a < 0.012) continue;
-            ctx.globalAlpha = a;
-            ctx.fillText(glyph, x, y);
+        const opacity = alpha * (this.dark ? 1 : 1.35);
+        for (let r = 1; r < grid.rows; r += 1) {
+          for (let c = 1; c < grid.cols; c += 1) {
+            const k = r * grid.cols + c;
+            const j = grid.sample[k], fx = grid.fx[k], fy = grid.fy[k];
+            const a = field[j] + (field[j + 1] - field[j]) * fx;
+            const b = field[j + fc] + (field[j + fc + 1] - field[j + fc]) * fx;
+            const base = a + (b - a) * fy;
+            const x = grid.x[k], y = grid.y[k], grain = grid.grain[k];
+            const displaced = boost[k] > 0.001 ? this.waterAt(grid, x + bendX[k], y + bendY[k]) : base;
+            // Preserve the unbroken ambient lattice under every disturbance.
+            const d = Math.min(1, base + Math.max(0, displaced - base) * 0.75 + energy[k]);
+            if (d < 0.06 || grain > 0.18 + d * 0.82) continue;
+            const glyph = d > 0.55 ? (grain < 0.6 ? 0 : 1) : d > 0.22 ? (grain < 0.7 ? 2 : 0) : grain < 0.7 ? 3 : 4;
+            const inkAlpha = Math.min(0.65, (0.025 + d * 0.25) * (1 + boost[k]) * opacity);
+            grid.glyphs[k] = glyph + 1;
+            grid.opacity[k] = inkAlpha;
+            ctx.globalAlpha = inkAlpha;
+            ctx.fillText(WATER_GLYPHS[glyph], x, y);
           }
         }
         ctx.restore();
       }
 
       drawWake(now, pal, alpha) {
-        const trail = this.trail;
-        if (!trail.length || alpha <= 0.01) return;
+        if (alpha <= 0.01) return;
         const ctx = this.ctx;
         ctx.save();
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.font = this.font;
         ctx.fillStyle = `rgb(${pal.wake})`;
-        const speedN = this.speedNorm || 0;
-        const turnN = clamp(Math.abs(this.turnRate || 0) / 0.1, 0, 1.4);
-        for (let i = 0; i < trail.length; i += 2) {
-          const p = trail[i];
-          const age = (now - p.t) / 1000;
-          if (age < 0.14 || age > 2.5) continue;
-          const f = 1 - age / 2.5;
-          const a =
-            Math.pow(f, 1.85) *
-            (0.55 + 0.2 * speedN + 0.25 * turnN) *
-            alpha;
-          if (a < 0.015) continue;
-          const dx = Math.cos(p.h);
-          const dy = Math.sin(p.h);
-          const nx = -dy;
-          const ny = dx;
-          const tailX = p.x - dx * p.L * 0.46;
-          const tailY = p.y - dy * p.L * 0.46;
-          const spread = p.L * 0.04 + age * (30 + 30 * turnN);
-          for (let side = -1; side <= 1; side += 2) {
-            const hh = hash2((p.t / 90) | 0, side > 0 ? 7 : 19);
-            const gx = tailX + nx * spread * side;
-            const gy = tailY + ny * spread * side;
-            ctx.globalAlpha = a * (0.55 + hh * 0.55);
-            ctx.fillText(
-              hh < 0.36 ? '~' : hh < 0.72 ? '-' : '.',
-              gx,
-              gy,
-            );
-            if (age < 1.15) {
-              ctx.globalAlpha = a * 0.42;
-              ctx.fillText(
-                '.',
-                gx - nx * this.cw * 1.6 * side,
-                gy - ny * this.cw * 1.6 * side,
-              );
-            }
-          }
-          if (age < 0.8) {
-            ctx.globalAlpha = a * 0.65;
-            ctx.fillText('~', tailX, tailY);
+        for (const p of this.trail) {
+          const age = this.clock - p.t0;
+          const fade = Math.pow(Math.max(0, 1 - age / 8), 1.7);
+          const c = Math.cos(p.h);
+          const s = Math.sin(p.h);
+          for (const side of [-1, 1]) {
+            const spread = p.L * 0.075 + age * (3.4 + p.speed * 2.5);
+            const x = p.x + p.flow.x * age - s * spread * side;
+            const y = p.y + p.flow.y * age + c * spread * side;
+            const a = fade * (0.14 + p.speed * 0.13 + p.effort * 0.22) * alpha;
+            ctx.globalAlpha = a * (1 + side * p.bank * 0.2);
+            this.paintGlyph(ctx, age < 2 ? '~' : age < 5 ? '-' : '.', x, y);
+            ctx.globalAlpha = a * 0.3;
+            this.paintGlyph(ctx, '.', x - s * side * this.cw * 1.5, y + c * side * this.cw * 1.5);
           }
         }
-
-        if (this.phase === 'cruise' || this.phase === 'enter') {
-          const o = this.orca;
+        for (const r of this.tailRipples) {
+          const age = this.clock - r.t0;
+          const life = age / r.life;
+          if (life < 0 || life >= 1) continue;
+          const radius = 3 + r.rmax * Math.sqrt(life);
+          const c = Math.cos(r.heading);
+          const s = Math.sin(r.heading);
+          const a = Math.pow(1 - life, 1.8) * r.strength * 0.56 * alpha;
+          // Broken counter-rotating arcs, elongated along the direction of the
+          // original stroke. Their centers never follow the moving animal.
+          for (let j = 0; j < 21; j += 1) {
+            const theta = j / 21 * TWO_PI * 0.8 + r.side * age * 0.65;
+            const x = Math.cos(theta) * radius * 0.68;
+            const y = Math.sin(theta) * radius;
+            ctx.globalAlpha = a * (0.4 + 0.6 * Math.sin(j / 21 * Math.PI));
+            this.paintGlyph(ctx, j % 3 ? '~' : '.', r.x + r.vx * age + x * c - y * s, r.y + r.vy * age + x * s + y * c);
+          }
+        }
+        // The bow pressure arc opens downstream, with intensity proportional
+        // to speed; it fades with the animal during the existing dive.
+        if (this.phase === 'enter' || this.phase === 'cruise') {
           const L = this.baseL * this.poseScale;
-          const hd = this.headingVisual || o.heading;
-          const dx = Math.cos(hd);
-          const dy = Math.sin(hd);
-          const nx = -dy;
-          const ny = dx;
-
-          const bx = o.x + dx * L * 0.47;
-          const by = o.y + dy * L * 0.47;
-          ctx.fillStyle = `rgb(${pal.water})`;
-          for (let k = -3; k <= 3; k += 1) {
-            const off = k * this.cw * 1.25;
-            const ahead = Math.abs(k) * this.cw * 0.55;
-            ctx.globalAlpha =
-              (0.2 + 0.1 * speedN + 0.08 * turnN - Math.abs(k) * 0.025) *
-              alpha;
-            ctx.fillText(
-              k === 0 ? '~' : '.',
-              bx + nx * off + dx * ahead,
-              by + ny * off + dy * ahead,
-            );
-          }
-
-          for (let side = -1; side <= 1; side += 2) {
-            for (let k = 0; k < 5; k += 1) {
-              const u = 0.28 + k * 0.13;
-              const along = (u - 0.5) * L;
-              const off =
-                (0.105 + 0.012 * Math.sin(this.clock * 0.9 + k)) *
-                L *
-                side;
-              const px = o.x + dx * along + nx * off;
-              const py = o.y + dy * along + ny * off;
-              ctx.globalAlpha =
-                (0.12 +
-                  0.08 * speedN +
-                  0.12 * turnN +
-                  0.04 * Math.sin(this.clock * 1.4 + k + side)) *
-                alpha;
-              ctx.fillText(k % 2 ? '~' : '.', px, py);
-            }
-          }
-
-          ctx.fillStyle = `rgb(${pal.wake})`;
-          for (let i = 0; i < this.tailRipples.length; i += 1) {
-            const r = this.tailRipples[i];
-            const age = (now - r.t0) / 1000;
-            if (age < 0 || age > r.life) continue;
-            const p = age / r.life;
-            const radius = 3 + r.rmax * (1 - Math.pow(1 - p, 1.8));
-            const a =
-              Math.pow(1 - p, 1.5) *
-              0.32 *
-              Math.min(1.8, r.strength || 1) *
-              alpha;
-            if (a < 0.012) continue;
-            for (let j = 0; j < 10; j += 1) {
-              const th = (j / 10) * TWO_PI + r.seed;
-              const hh = hash2((r.seed * 7) | 0, j);
-              const px = r.x + Math.cos(th) * radius;
-              const py = r.y + Math.sin(th) * radius * 0.62;
-              ctx.globalAlpha = a * (0.5 + hh * 0.6);
-              ctx.fillText(
-                hh < 0.55 ? '~' : hh < 0.82 ? '.' : '-',
-                px,
-                py,
-              );
+          const c = Math.cos(this.orca.heading);
+          const s = Math.sin(this.orca.heading);
+          const nose = this.bodyPoint(0.985);
+          for (const side of [-1, 1]) {
+            for (let i = 1; i < 10; i += 1) {
+              const u = i / 10;
+              const back = L * 0.19 * u * u;
+              const across = side * L * (0.018 + u * 0.105);
+              ctx.globalAlpha = (1 - u * 0.75) * this.speedNorm * 0.34 * alpha * (1 - this.depth * 0.7);
+              this.paintGlyph(ctx, i % 3 ? '-' : '.', nose.x - c * back - s * across, nose.y - s * back + c * across);
             }
           }
         }
@@ -1045,133 +1230,126 @@ window.__ModuleLoader__.load({
 
       drawOrca(now, pal, alpha) {
         if (!this.orca || alpha <= 0.01) return;
-        let cx = this.orca.x;
-        let cy = this.orca.y;
-        let heading = this.headingVisual || this.orca.heading;
-        let scale = this.poseScale;
-        let bodyAlpha = alpha;
-        let cover = 0;
-        if (this.phase === 'dive' || this.phase === 'after') {
-          cx = this.diveX;
-          cy = this.diveY;
-          heading = this.diveHeading;
-          cover = this.phase === 'after' ? 1 : this.diveCover;
+        const cover = this.phase === 'dive' ? this.diveCover : this.phase === 'after' ? 1 : 0;
+        const frame = this.projectionFrame();
+        // Bound the articulated volume, rather than allocating a depth buffer
+        // for the entire viewport. Allow room for the strongest stroke and turn.
+        const bx = 0.57, by = VHALF + Math.abs(this.curvature) * 0.019, bz = 0.26;
+        const rx = (Math.abs(frame.xx) * bx + Math.abs(frame.xy) * by + Math.abs(frame.xz) * bz) * frame.L;
+        const ry = (Math.abs(frame.yx) * bx + Math.abs(frame.yy) * by + Math.abs(frame.yz) * bz) * frame.L;
+        const cy = frame.y + frame.depth * CAMERA_LIFT * frame.L;
+        const cStart = Math.max(0, Math.floor((frame.x - rx) / this.cw) - 1);
+        const rStart = Math.max(0, Math.floor((cy - ry) / this.ch) - 1);
+        const cEnd = Math.min(Math.ceil(this.w / this.cw), Math.ceil((frame.x + rx) / this.cw) + 1);
+        const rEnd = Math.min(Math.ceil(this.h / this.ch), Math.ceil((cy + ry) / this.ch) + 1);
+        const cols = cEnd - cStart + 1, rows = rEnd - rStart + 1;
+        if (cols <= 0 || rows <= 0) return;
+        const count = cols * rows;
+        if (!this.glyphBuffer || this.glyphBuffer.score.length < count) {
+          const capacity = Math.ceil(count / 1024) * 1024;
+          this.glyphBuffer = { score: new Float32Array(capacity), index: new Int32Array(capacity),
+            light: new Float32Array(capacity), depth: new Float32Array(capacity), touched: new Int32Array(capacity), used: 0 };
+          this.glyphBuffer.score.fill(-Infinity);
         }
-        const L = this.baseL * scale;
-        if (cover > 0) cy += L * 0.24 * cover;
-        if (L < 60 || bodyAlpha <= 0.015) return;
-        const depth = clamp((scale - 0.9) / 0.16, 0, 1);
-        bodyAlpha *=
-          (0.84 + 0.16 * depth) * (1 - 0.87 * cover) * (this.dark ? 1 : 1.42);
-        const ink = rgbCss(mixRgb(pal.inkRgb, pal.waterRgb, cover * 0.55));
-        const patchInk = rgbCss(
-          mixRgb(pal.patchRgb, pal.waterRgb, cover * 0.5),
-        );
+        const buffer = this.glyphBuffer;
+        for (let n = 0; n < buffer.used; n += 1) buffer.score[buffer.touched[n]] = -Infinity;
+        buffer.used = 0;
+        if (!this.poseColumns) this.poseColumns = Array.from({ length: COLS }, () => ({}));
+        for (let c = 0; c < COLS; c += 1) this.bodyColumn(c / (COLS - 1), this.poseColumns[c]);
+        const pose = {};
+        const p = {};
+        // Forward projection with a depth buffer onto a fixed SCREEN lattice.
+        // Text never rotates or scales: the visible characters are reconstructed
+        // as the rounded body, articulated flukes and flippers move through it.
+        for (let i = 0; i < SURFACE.length; i += 1) {
+          const point = SURFACE[i];
+          const column = this.poseColumns[point.column];
+          this.bodyPose(point.u, point.v, pose, column, point.finTip);
+          this.projectPoint(point.u, point.v, point.z, frame, pose, p);
+          const gx = p.x / this.cw - cStart;
+          const gy = p.y / this.ch - rStart;
+          if (gx < -1 || gx > cols || gy < -1 || gy > rows) continue;
+          const c0 = Math.floor(gx);
+          const r0 = Math.floor(gy);
+          let light = -1;
+          for (let dy = 0; dy < 2; dy += 1) {
+            const r = r0 + dy;
+            if (r < 0 || r >= rows) continue;
+            for (let dx = 0; dx < 2; dx += 1) {
+              const c = c0 + dx;
+              if (c < 0 || c >= cols) continue;
+              const distance = (gx - c) ** 2 + (gy - r) ** 2;
+              if (distance > 0.95 || point.cov < 0.18 + distance * 0.18) continue;
+              const k = r * cols + c;
+              const score = p.view - distance * 0.045;
+              if (score <= buffer.score[k]) continue;
+              if (buffer.score[k] === -Infinity) buffer.touched[buffer.used++] = k;
+              buffer.score[k] = score;
+              buffer.index[k] = i;
+              if (light < 0) {
+                // Rotate the fixed light once per frame. Only winning samples
+                // need shading; rotation does not change the normal's length.
+                const nx = point.nx - column.normal;
+                light = clamp((nx * frame.lx + point.ny * frame.ly + point.nz * frame.lz) /
+                  Math.sqrt(1 - 2 * point.nx * column.normal + column.normal * column.normal), 0, 1);
+              }
+              buffer.light[k] = light;
+              buffer.depth[k] = p.z;
+            }
+          }
+        }
         const ctx = this.ctx;
-        const cos = Math.cos(heading);
-        const sin = Math.sin(heading);
-        const nCols = Math.max(16, Math.ceil(L / this.cw));
-        const nRows = Math.max(10, Math.ceil((2 * VHALF * L) / this.ch));
-        const phase = this.wave;
+        const waterMix = clamp(this.depth * 0.4 + cover * 0.65, 0, 0.85);
+        const ink = rgbCss(mixRgb(pal.inkRgb, pal.waterRgb, waterMix));
+        const white = rgbCss(mixRgb(pal.patchRgb, pal.waterRgb, waterMix));
+        const bodyAlpha = alpha * (1 - smooth(0.62, 1, cover)) * (1 - Math.min(this.depth, 0.8) * 0.28);
         ctx.save();
-        ctx.translate(cx, cy);
-        ctx.rotate(heading);
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.font = this.font;
         ctx.fillStyle = ink;
-        for (let r = 0; r < nRows; r += 1) {
-          const v = ((r + 0.5) / nRows - 0.5) * 2 * VHALF;
-          const ly = v * L;
-          for (let c = 0; c < nCols; c += 1) {
-            // Mask columns run tail (0) -> head (1). Local +x is forward, so
-            // the head must sit at +L/2 and the fluke at -L/2.
-            const u = (c + 0.5) / nCols;
-            const lx = (u - 0.5) * L;
-            let px = lx;
-            let py = ly;
-            if (cover > 0) {
-              // A small sink and a gentle head-down arch: the body stays the
-              // same size, but it visibly works its way under the surface.
-              const bend =
-                (u - 0.5) * 0.12 * L * cover +
-                Math.sin(u * 9 + this.wave * 1.4) * 0.006 * L * cover;
-              px = lx + Math.sin(heading) * bend;
-              py = ly + Math.cos(heading) * bend;
-              if (hash2(c * 3 + 7, r * 5 + 11) < cover * 0.05) continue;
+        for (let n = 0; n < buffer.used; n += 1) {
+          const k = buffer.touched[n];
+          const point = SURFACE[buffer.index[k]];
+          const c = k % cols + cStart;
+          const r = ((k / cols) | 0) + rStart;
+          const x = c * this.cw;
+          const y = r * this.ch;
+          const key = hash2(c, r);
+          const light = buffer.light[k];
+          const z = buffer.depth[k];
+          // Moving caustic bands cross the volume in world space. They alter
+          // glyph density and illumination; they are not a body-wide blink.
+          const field = Math.sin(x * 0.036 + y * 0.019 - this.clock * 1.35) +
+            Math.sin(y * 0.047 - x * 0.012 + this.clock * 0.74);
+          const caustic = Math.pow(Math.max(0, 1 - Math.abs(field) * 1.8), 3) * (0.5 + light * 0.5);
+          const shade = 0.54 + light * 0.61 + caustic * 0.26;
+          const submerged = clamp(-z * 5, 0, 0.95);
+          // Geometric depth and pitch hide the nose before the tail. A final
+          // global dissolve only removes the last submerged traces.
+          const visibility = 1 - smooth(0.12, 0.4, -z);
+          const tone = clamp(point.tone * (0.65 + light * 0.4) + caustic * 0.1, 0, 1);
+          const a = (0.32 + point.tone * 0.66) * shade * bodyAlpha * visibility * (1 - submerged * 0.3);
+          if (point.patch > 0.44 && point.tone > 0.55) {
+            if (this.dark) {
+              ctx.fillStyle = white;
+              ctx.globalAlpha = clamp((0.65 + point.patch * 0.3) * shade * bodyAlpha * visibility, 0, 1);
+              this.paintGlyph(ctx, PATCH_GLYPHS[Math.floor(key * 4)], x, y);
+              ctx.fillStyle = ink;
             }
-            const tailness = 1 - u;
-            const alive =
-              1 +
-              cover * 1.35 +
-              Math.min(1.2, Math.abs(this.turnRate || 0) / 0.1) * 0.35;
-            const sway =
-              (Math.sin(phase - tailness * 5.1) * 0.028 +
-                Math.sin(phase * 0.5 - tailness * 2.7) * 0.009) *
-              alive *
-              (0.2 + 0.8 * tailness * tailness);
-            // The dorsal fin and the pectoral flipper flex a little on their
-            // own, slower than the tail, so the animal never looks rigid.
-            const finSpan =
-              smooth(0.54, 0.61, u) * (1 - smooth(0.73, 0.79, u));
-            let finOffset = 0;
-            if (finSpan > 0.001) {
-              const dorsalW = finSpan * smooth(-0.09, -0.21, v);
-              if (dorsalW > 0.001) {
-                const flapD = Math.sin(phase * 0.62 + 1.2);
-                finOffset += flapD * 0.007 * dorsalW * alive;
-              }
-              const flipW = finSpan * smooth(0.09, 0.22, v);
-              if (flipW > 0.001) {
-                const flapF = Math.sin(phase * 0.62 + 2.6);
-                const root = 0.085;
-                const rel = v + sway - root;
-                finOffset +=
-                  (rel * (0.08 * flapF * flipW) + flapF * 0.012 * flipW) *
-                  alive;
-              }
-            }
-            const vm = clamp(
-              (v + sway + finOffset + VHALF) / (2 * VHALF),
-              0,
-              1,
-            );
-            const cov = sampleField(COV, u, vm);
-            if (cov < 0.21) continue;
-            const sx = cx + px * cos - py * sin;
-            const sy = cy + px * sin + py * cos;
-            if (sx < -20 || sx > this.w + 20 || sy < -20 || sy > this.h + 20) continue;
-            const t = sampleField(TONE, u, vm);
-            const key = hash2((u * 160) | 0, (vm * 88) | 0);
-            if (t > 0.55) {
-              const pw = sampleField(PATCH, u, vm);
-              if (pw > 0.44) {
-                if (this.dark) {
-                  ctx.globalAlpha =
-                    clamp(0.5 + pw * 0.5, 0, 1) * bodyAlpha;
-                  ctx.fillStyle = patchInk;
-                  ctx.fillText(PATCH_GLYPHS[(key * 4) | 0], px, py);
-                  ctx.fillStyle = ink;
-                }
-                continue;
-              }
-            }
-            let a = 0.24 + t * 0.72;
-            if (cov < 0.72) a *= 0.4 + cov * 0.6;
-            a *= bodyAlpha;
-            if (a < 0.02) continue;
-            const jitter = key < 0.18 ? -1 : key > 0.86 ? 1 : 0;
-            const idx = clamp(Math.round(1 + t * 15) + jitter, 1, GLYPHS.length - 1);
-            ctx.globalAlpha = a;
-            ctx.fillText(GLYPHS.charAt(idx), px, py);
-            if (t > 0.5 && cov > 0.58 && key > 0.45) {
-              ctx.globalAlpha = a * 0.38;
-              ctx.fillText(
-                '.',
-                px + this.cw * 0.46,
-                py + this.ch * 0.32,
-              );
-            }
+          } else {
+            const density = Math.round(1 + tone * 14 + (light - 0.5) * 2 + caustic * 2 - submerged * 2);
+            const idx = clamp(density + (key > 0.8 ? 1 : 0), 1, GLYPHS.length - 1);
+            ctx.globalAlpha = clamp(a * (this.dark ? 1 : 1.35), 0, 1);
+            this.paintGlyph(ctx, GLYPHS[idx], x, y);
+          }
+          // Surface grain visibly crosses submerged parts, instead of the
+          // animal always being pasted over the water as one opaque layer.
+          if (submerged > 0.08 && caustic > 0.25 && key < submerged * 0.6) {
+            ctx.fillStyle = `rgb(${pal.water})`;
+            ctx.globalAlpha = submerged * caustic * alpha * 0.44;
+            this.paintGlyph(ctx, key < 0.2 ? '~' : '-', x, y);
+            ctx.fillStyle = ink;
           }
         }
         ctx.restore();
@@ -1190,7 +1368,7 @@ window.__ModuleLoader__.load({
           const age = this.clock - sp.t0;
           if (age < 0 || age > sp.life) continue;
           const x = sp.x + sp.vx * age;
-          const y = sp.y + sp.vy * age + 20 * age * age;
+          const y = sp.y + sp.vy * age;
           const a =
             Math.pow(1 - age / sp.life, 1.4) *
             0.5 *
@@ -1198,119 +1376,39 @@ window.__ModuleLoader__.load({
             alpha;
           if (a < 0.012) continue;
           ctx.globalAlpha = a;
-          ctx.fillText(sp.ch, x, y);
+          this.paintGlyph(ctx, sp.ch, x, y);
         }
         ctx.restore();
       }
 
       drawDiveRings(now, pal, alpha) {
-        if (this.phase !== 'dive' && this.phase !== 'after') return;
-        if (alpha <= 0.01) return;
-        const L = this.baseL * this.poseScale;
-        const hd = this.diveHeading;
-        const cos = Math.cos(hd);
-        const sin = Math.sin(hd);
-        const q = this.phase === 'after' ? 1 : this.diveCover;
-        const bodyY = this.diveY + L * 0.1 * q;
-        const baseT = (now - this.diveAt) / 1000;
-        const centers = [
-          { x: this.diveX, y: bodyY, s: 1.0, seed: 11 },
-          {
-            x: this.diveX + cos * L * 0.3,
-            y: bodyY + sin * L * 0.3,
-            s: 0.62,
-            seed: 27,
-          },
-          {
-            x: this.diveX - cos * L * 0.32,
-            y: bodyY - sin * L * 0.32,
-            s: 0.58,
-            seed: 41,
-          },
-        ];
+        if (!this.surfaceRipples.length || alpha <= 0.01) return;
         const ctx = this.ctx;
         ctx.save();
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.font = this.font;
         ctx.fillStyle = `rgb(${pal.crest})`;
-        ctx.font = `500 ${Math.round(this.ch * 1.12)}px ${MONO}`;
-
-        // Ripples are deliberately uneven: three centres along the body,
-        // broken and radially wobbled arcs, so they read as disturbed water
-        // rather than clean target rings.
-        for (let ci = 0; ci < centers.length; ci += 1) {
-          const c0 = centers[ci];
-          for (let k = 0; k < 3; k += 1) {
-            const age = baseT - ci * 0.07 - k * 0.16;
-            if (age < 0) continue;
-            const p = age / 2.6;
-            if (p > 1) continue;
-            const grow = 1 - Math.pow(1 - p, 1.55);
-            const shape = 0.9 + 0.2 * hash2(c0.seed, k);
-            const rx = L * (0.13 + 0.5 * grow) * c0.s * shape;
-            const ry = rx * (0.33 + 0.12 * hash2(c0.seed + 3, k));
-            const a =
-              Math.pow(1 - p, 1.1) *
-              (0.6 + 0.15 * hash2(c0.seed + 5, k)) *
-              alpha;
-            if (a < 0.01) continue;
-            const count = clamp(
-              Math.round((Math.PI * (rx + ry)) / (this.cw * 2.0)),
-              14,
-              100,
-            );
-            for (let j = 0; j < count; j += 1) {
-              const th = (j / count) * TWO_PI;
-              const hh = hash2(c0.seed * 13 + j * 3, k + 7);
-              if (hh < 0.03) continue;
-              const wob =
-                1 +
-                0.1 * Math.sin(th * 3 + c0.seed + baseT * 1.8) +
-                0.07 * (hash2(j + c0.seed, k) - 0.5);
-              const ex = Math.cos(th) * rx * wob;
-              const ey = Math.sin(th) * ry * wob;
-              const x = c0.x + ex * cos - ey * sin;
-              const y = c0.y + ex * sin + ey * cos;
-              if (x < -10 || x > this.w + 10 || y < -10 || y > this.h + 10) {
-                continue;
-              }
-              const glyph =
-                hh < 0.3 ? '~' : hh < 0.55 ? '-' : hh < 0.8 ? '.' : "'";
-              ctx.globalAlpha = a * (0.45 + hh * 0.7);
-              ctx.fillText(glyph, x, y);
-            }
+        for (const ripple of this.surfaceRipples) {
+          const age = this.clock - ripple.t0;
+          const p = age / ripple.life;
+          if (p < 0 || p >= 1) continue;
+          const radius = 5 + ripple.size * Math.sqrt(p);
+          const a = ripple.strength * Math.pow(1 - p, 1.6) * smooth(0, 0.13, age) * alpha * 0.48;
+          const count = Math.max(16, Math.round(TWO_PI * radius / (this.cw * 1.6)));
+          for (let j = 0; j < count; j += 1) {
+            const th = j / count * TWO_PI;
+            const key = hash2(j, Math.round(ripple.t0 * 19));
+            if (key < 0.16) continue;
+            const r = radius * (1 + Math.sin(th * 3 + ripple.heading) * 0.06);
+            ctx.globalAlpha = a * (0.65 + key * 0.35);
+            this.paintGlyph(ctx, key < 0.6 ? '~' : '.', ripple.x + ripple.flow.x * age + Math.cos(th) * r,
+              ripple.y + ripple.flow.y * age + Math.sin(th) * r * CAMERA_PLANE);
           }
         }
         ctx.restore();
       }
 
-      drawBubbles(now, pal, alpha) {
-        if (!this.bubbles.length || alpha <= 0.01) return;
-        const ctx = this.ctx;
-        ctx.save();
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.font = this.font;
-        ctx.fillStyle = `rgb(${pal.wake})`;
-        for (let i = 0; i < this.bubbles.length; i += 1) {
-          const b = this.bubbles[i];
-          const age = (now - b.t0) / 1000;
-          if (age < 0 || age > b.life) continue;
-          const p = age / b.life;
-          const x = b.x + Math.sin(age * 4.2 + b.phase) * b.drift * age;
-          const y = b.y - b.vy * age;
-          const a = b.a * (1 - p) * alpha;
-          if (a < 0.03) continue;
-          ctx.globalAlpha = a;
-          ctx.fillText(
-            BUBBLE_GLYPHS[(b.size * BUBBLE_GLYPHS.length) | 0],
-            x,
-            y,
-          );
-        }
-        ctx.restore();
-      }
 
     }
 

@@ -8,15 +8,19 @@ A dynamic pure-ASCII background of a cruising orca, active only on the new-sessi
 
 ![Orca cruising and diving](assets/demo.gif)
 
-[Watch the full recording](assets/demo.mp4)
+[Watch the full recording](assets/demo.mp4) (isolated browser preview)
 
 | Light mode | Dark mode |
 | --- | --- |
 | ![Light mode](assets/light.png) | ![Dark mode](assets/dark.png) |
 
-Demo environment: DeepSeek Harness `0.2.1-rc.3` on macOS.
+The light and dark screenshots are from DeepSeek Harness.
 
 Compatible with DeepSeek Harness `0.2.1-rc.2` and later `0.2.x` releases.
+
+## v0.1.3
+
+Improved the orca’s swimming motion and refined the visuals, with a slight increase in rendering overhead. See the [changelog](CHANGELOG.md).
 
 ## Install
 

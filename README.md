@@ -8,15 +8,19 @@
 
 ![虎鲸游弋与下潜演示](assets/demo.gif)
 
-[观看完整录屏](assets/demo.mp4)
+[观看完整录屏](assets/demo.mp4)（隔离的浏览器预览）
 
 | 浅色模式 | 深色模式 |
 | --- | --- |
 | ![浅色模式](assets/light.png) | ![深色模式](assets/dark.png) |
 
-演示环境：DeepSeek Harness `0.2.1-rc.3`（macOS）。
+亮暗截图来自 DeepSeek Harness。
 
 兼容 DeepSeek Harness `0.2.1-rc.2` 及后续 `0.2.x` 版本。
+
+## v0.1.3
+
+提升虎鲸游弋动态，优化视觉效果，性能开销略有增加。详见 [版本记录](CHANGELOG.md)。
 
 ## 安装
 
